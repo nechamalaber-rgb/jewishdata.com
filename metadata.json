@@ -1,0 +1,9 @@
+{
+  "name": "JewishData Genealogy Assistant",
+  "description": "A professional AI assistant for JewishData.com that provides general site information and queries a massive 1,000,000+ record database using structured function calling and vision capabilities.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "display-capture"
+  ]
+}
