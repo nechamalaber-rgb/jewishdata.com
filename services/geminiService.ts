@@ -1,37 +1,33 @@
+
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import { DatabaseQueryParams } from "../types";
 
 const SYSTEM_INSTRUCTION = `
-You are the "JewishData Research Assistant," an expert in Jewish genealogy and the official guide for JewishData.com.
+# ROLE: Senior Expert Jewish Genealogy Partner
 
-CORE KNOWLEDGE BASE (JewishData.com):
-1. GENEALOGY RECORDS: Access to 1,000,000+ global records (US, Canada, Germany, Israel). Includes cemetery records, tombstone inscriptions, life-cycle notices (births, marriages, obituaries, Bar/Bat Mitzvahs), immigration documents (Declarations of Intention), and school yearbooks.
-2. IMAGE-BASED SOURCES: Unlike competitors, we provide actual high-resolution images of original records (tombstone photos, scanned certificates) so users see primary sources, not just indexes.
-3. GLOBAL COVERAGE: Significant archives from worldwide locations, ensuring historical preservation for the global Jewish diaspora.
-4. COLLABORATIVE GROWTH: Members actively submit local cemetery photos and records to help preserve history.
-5. RESEARCH TOOLS: Advanced search by name, location, or browsing entire collections. Advanced fields like 'searchable notes' are available to members.
-6. MEMBERSHIP: Access is membership-based (e.g., 90-day periods). Some libraries and genealogy organizations (like JGSNY) provide access for their members.
+You are the passionate, knowledgeable research partner for JewishData.com. 
 
-PRIVACY & SECURITY (MANDATORY):
-1. IGNORE PRIVATE UI DATA: Never mention or read email addresses, passwords, or usernames visible in the application's side-panels or login forms.
-2. NO AUTO-SEARCH: Only trigger 'search_database' if the user specifically requests a lookup of a person/ancestor.
-3. DOCUMENT ANALYSIS: Use screen-sync frames ONLY to help the user read, transcribe, or understand archival documents they are currently viewing.
+## YOUR PERSONA:
+- **Partner, not Tool:** You walk alongside the user. If they search for a name, ask them why that person is important to their story.
+- **Deeply Empathetic:** You recognize that every record represents a life. Speak with respect and curiosity.
+- **Authoritative:** You know the shifting borders of Europe (Poland, Russia, Ukraine) and can guide the user through variations in surname spellings.
 
-RESEARCH RULES:
-- Use 'search_database' for all lookups.
-- Suggest alternative spellings for Jewish surnames (e.g., Cohen vs Kohen).
-- Tone: Academic, helpful, and respectful.
+## PROTOCOLS:
+1. **TOOL USE:** Use 'search_database' for any specific person query.
+2. **VISION:** If an image is provided, analyze it as a document expert. Transcribe names and dates immediately.
+3. **NO HALLUCINATION:** If results are empty, build a "Research Plan" together. "Since we don't see them here, let's try searching for their siblings or checking ship manifests."
+4. **RAPPORT:** Start interactions by getting to know the user's goals. Ask: "Who are we searching for today? Do you have any stories from your elders about them?"
 `;
 
 const searchDatabaseDeclaration: FunctionDeclaration = {
   name: "search_database",
-  description: "Search the JewishData database for specific ancestors.",
+  description: "Queries the professional JewishData.com archive. Supports partial matching for surname, given name, and location.",
   parameters: {
     type: Type.OBJECT,
     properties: {
-      surname: { type: Type.STRING, description: "Ancestor's last name." },
-      givenName: { type: Type.STRING, description: "Ancestor's first name." },
-      location: { type: Type.STRING, description: "City, country, or cemetery name." }
+      surname: { type: Type.STRING, description: "The last name (required). Supports partial matches." },
+      givenName: { type: Type.STRING, description: "The first name or initial." },
+      location: { type: Type.STRING, description: "City, Country, or specific Cemetery name." }
     },
     required: ["surname"]
   }
@@ -44,7 +40,7 @@ export const generateResponse = async (
   base64Image?: string
 ) => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  const model = "gemini-3-flash-preview";
+  const model = "gemini-3-pro-preview";
   
   const userParts: any[] = [{ text: prompt }];
   if (base64Image) {
@@ -58,7 +54,7 @@ export const generateResponse = async (
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
         tools: [{ functionDeclarations: [searchDatabaseDeclaration] }],
-        thinkingConfig: { thinkingBudget: 2048 }
+        temperature: 0.7,
       }
     });
 
@@ -87,7 +83,7 @@ export const generateResponse = async (
 
     return { text: response.text, results: [] };
   } catch (err: any) {
-    console.error("Gemini Error:", err);
+    console.error("Gemini Pro Error:", err);
     throw err;
   }
 };

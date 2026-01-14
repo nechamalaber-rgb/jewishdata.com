@@ -10,147 +10,144 @@ interface ChatInterfaceProps {
 }
 
 const STORAGE_KEY = 'jewish_data_chat_history';
-const LOG_KEY = 'jewish_data_research_log';
 const BRAND_LOGO_URL = "https://r2-shared.galileo.ai/shared/f5466c1b-689b-4493-9799-d754988775f0.png";
+const FRAME_RATE = 1.0; 
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ onClose }) => {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [researchLog, setResearchLog] = useState<SearchResult[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isVoiceActive, setIsVoiceActive] = useState(false);
-  const [bridgeStatus, setBridgeStatus] = useState<'online' | 'offline' | 'checking'>('checking');
-  const [permissionError, setPermissionError] = useState<string | null>(null);
-  const [showLog, setShowLog] = useState(false);
-  
-  const currentAssistantTranscriptionRef = useRef('');
-  const currentUserTranscriptionRef = useRef('');
+  const [micLevel, setMicLevel] = useState(0); 
+  const [userTranscription, setUserTranscription] = useState('');
+  const [isConnecting, setIsConnecting] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(document.createElement('canvas'));
   
-  const liveSessionRef = useRef<any>(null);
+  const liveSessionRef = useRef<Promise<any> | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
-  const inputCtxRef = useRef<AudioContext | null>(null);
-  
+  const audioCtxRef = useRef<{ input: AudioContext; output: AudioContext } | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const activeSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
-  const outputCtxRef = useRef<AudioContext | null>(null);
+
+  const currentAssistantTranscriptionRef = useRef('');
+  const currentUserTranscriptionRef = useRef('');
+
+  // Fix: Defined stopVoice function to stop active media tracks and close the live session.
+  const stopVoice = () => {
+    setIsVoiceActive(false);
+    setIsConnecting(false);
+    setIsScreenSharing(false);
+    
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach(t => t.stop());
+      micStreamRef.current = null;
+    }
+
+    if (liveSessionRef.current) {
+      liveSessionRef.current.then((s: any) => s.close());
+      liveSessionRef.current = null;
+    }
+
+    activeSourcesRef.current.forEach(s => s.stop());
+    activeSourcesRef.current.clear();
+    nextStartTimeRef.current = 0;
+
+    if (audioCtxRef.current) {
+      audioCtxRef.current.input.close();
+      audioCtxRef.current.output.close();
+      audioCtxRef.current = null;
+    }
+  };
 
   useEffect(() => {
     const savedChat = localStorage.getItem(STORAGE_KEY);
     if (savedChat) {
       try {
-        const parsed = JSON.parse(savedChat);
-        setMessages(parsed.map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) })));
-      } catch (e) { console.error(e); }
+        setMessages(JSON.parse(savedChat).map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) })));
+      } catch (e) {}
     } else {
-      setMessages([{ 
-        id: '1', 
-        role: 'assistant', 
-        content: 'Shalom! I am your Research Assistant. I have indexed over 1,000,000 records. How can I assist your family tree search today?', 
-        timestamp: new Date() 
-      }]);
+      setMessages([{ id: '1', role: 'assistant', content: "Welcome! I'm your JewishData research partner. Share your screen or just start talking—I'm ready to help you trace your lineage.", timestamp: new Date() }]);
     }
-    const savedLog = localStorage.getItem(LOG_KEY);
-    if (savedLog) setResearchLog(JSON.parse(savedLog));
-    checkBridge();
-
+    // Fix: Clean up voice session on component unmount using stopVoice.
     return () => {
       stopVoice();
     };
   }, []);
 
-  const checkBridge = async () => {
-    setBridgeStatus('checking');
-    try {
-      const res = await fetch('http://localhost:3000/api/search', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ surname: 'ping' })
-      });
-      setBridgeStatus(res.ok ? 'online' : 'offline');
-    } catch {
-      setBridgeStatus('offline');
-    }
-  };
-
   useEffect(() => {
-    if (messages.length > 0) localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
-    if (researchLog.length > 0) localStorage.setItem(LOG_KEY, JSON.stringify(researchLog));
-  }, [messages, researchLog]);
-
-  useEffect(() => scrollRef.current?.scrollIntoView({ behavior: 'smooth' }), [messages, isTyping]);
-
-  const addToLog = (result: SearchResult) => {
-    if (!researchLog.find(r => r.id === result.id)) {
-      setResearchLog(prev => [...prev, result]);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  };
+  }, [messages]);
 
-  const stopVoice = () => {
-    // 1. Stop all outgoing audio
-    activeSourcesRef.current.forEach(source => { try { source.stop(); } catch (e) {} });
-    activeSourcesRef.current.clear();
-    nextStartTimeRef.current = 0;
-
-    // 2. Close the Live Session
-    if (liveSessionRef.current) {
-      liveSessionRef.current.then((session: any) => session.close());
-      liveSessionRef.current = null;
+  // Screen frame capture loop for streaming to the Gemini Live API.
+  useEffect(() => {
+    let interval: any;
+    if (isVoiceActive && isScreenSharing) {
+      interval = setInterval(() => {
+        if (!videoRef.current || !liveSessionRef.current) return;
+        const canvas = canvasRef.current;
+        const video = videoRef.current;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        
+        canvas.toBlob(async (blob) => {
+          if (blob && liveSessionRef.current) {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const base64 = (reader.result as string).split(',')[1];
+              liveSessionRef.current?.then((session: any) => {
+                session.sendRealtimeInput({ 
+                  media: { data: base64, mimeType: 'image/jpeg' } 
+                });
+              });
+            };
+            reader.readAsDataURL(blob);
+          }
+        }, 'image/jpeg', 0.6);
+      }, 1000 / FRAME_RATE);
     }
-
-    // 3. Stop Mic and Contexts
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach(track => track.stop());
-      micStreamRef.current = null;
-    }
-    if (inputCtxRef.current) {
-      inputCtxRef.current.close();
-      inputCtxRef.current = null;
-    }
-
-    setIsVoiceActive(false);
-    currentUserTranscriptionRef.current = '';
-    currentAssistantTranscriptionRef.current = '';
-  };
+    return () => clearInterval(interval);
+  }, [isVoiceActive, isScreenSharing]);
 
   const startVoice = async () => {
-    setPermissionError(null);
     try {
-      if (!outputCtxRef.current) {
-        outputCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      }
-      if (outputCtxRef.current.state === 'suspended') await outputCtxRef.current.resume();
+      setIsConnecting(true);
+      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      audioCtxRef.current = { input: inputCtx, output: outputCtx };
 
       const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStreamRef.current = micStream;
-      
-      const inputCtx = new AudioContext({ sampleRate: 16000 });
-      inputCtxRef.current = inputCtx;
 
-      liveSessionRef.current = connectLive(
+      const sessionPromise = connectLive(
         (buffer) => {
-          if (!outputCtxRef.current) return;
-          const source = outputCtxRef.current.createBufferSource();
+          const source = outputCtx.createBufferSource();
           source.buffer = buffer;
-          source.connect(outputCtxRef.current.destination);
-          const now = outputCtxRef.current.currentTime;
-          if (nextStartTimeRef.current < now) nextStartTimeRef.current = now + 0.05;
-          source.start(nextStartTimeRef.current);
-          nextStartTimeRef.current += buffer.duration;
+          source.connect(outputCtx.destination);
+          const start = Math.max(nextStartTimeRef.current, outputCtx.currentTime);
+          source.start(start);
+          nextStartTimeRef.current = start + buffer.duration;
           activeSourcesRef.current.add(source);
           source.onended = () => activeSourcesRef.current.delete(source);
         },
         (text, isUser, isTurnComplete) => {
           if (isUser) {
             currentUserTranscriptionRef.current += text;
+            setUserTranscription(currentUserTranscriptionRef.current);
           } else {
             currentAssistantTranscriptionRef.current += text;
           }
-          
+
           if (isTurnComplete) {
             const userMsg = currentUserTranscriptionRef.current.trim();
             const assistantMsg = currentAssistantTranscriptionRef.current.trim();
@@ -158,12 +155,13 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onClose }) => {
             if (userMsg || assistantMsg) {
               setMessages(prev => [
                 ...prev,
-                ...(userMsg ? [{ id: `u-${Date.now()}`, role: 'user', content: userMsg, timestamp: new Date() } as Message] : []),
-                ...(assistantMsg ? [{ id: `a-${Date.now()}`, role: 'assistant', content: assistantMsg, timestamp: new Date() } as Message] : [])
+                ...(userMsg ? [{ id: Date.now().toString(), role: 'user' as const, content: userMsg, timestamp: new Date() }] : []),
+                ...(assistantMsg ? [{ id: (Date.now() + 1).toString(), role: 'assistant' as const, content: assistantMsg, timestamp: new Date() }] : [])
               ]);
             }
             currentUserTranscriptionRef.current = '';
             currentAssistantTranscriptionRef.current = '';
+            setUserTranscription('');
           }
         },
         () => {
@@ -171,245 +169,271 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onClose }) => {
           activeSourcesRef.current.clear();
           nextStartTimeRef.current = 0;
         },
-        searchRealDatabase
+        searchRealDatabase,
+        outputCtx
       );
 
+      liveSessionRef.current = sessionPromise;
+
+      // Pipe Microphone audio data to the Live Session using createScriptProcessor.
       const source = inputCtx.createMediaStreamSource(micStream);
-      const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
-      scriptProcessor.onaudioprocess = (e) => {
-        if (!liveSessionRef.current) return;
-        liveSessionRef.current.then((session: any) => {
-          session.sendRealtimeInput({ media: createPcmBlob(e.inputBuffer.getChannelData(0)) });
-        });
+      const processor = inputCtx.createScriptProcessor(4096, 1, 1);
+      processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        let sum = 0;
+        for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
+        setMicLevel(Math.sqrt(sum / inputData.length));
+
+        const blob = createPcmBlob(inputData);
+        sessionPromise.then(s => s.sendRealtimeInput({ media: blob }));
       };
-      source.connect(scriptProcessor);
-      scriptProcessor.connect(inputCtx.destination);
+      source.connect(processor);
+      processor.connect(inputCtx.destination);
+
       setIsVoiceActive(true);
-    } catch (err: any) { 
-      setPermissionError(err.message); 
+      setIsConnecting(false);
+    } catch (err) {
+      console.error("Failed to start voice mode:", err);
       stopVoice();
     }
   };
 
   const toggleScreenShare = async () => {
     if (isScreenSharing) {
-      (videoRef.current?.srcObject as MediaStream)?.getTracks().forEach(t => t.stop());
+      if (videoRef.current && videoRef.current.srcObject) {
+        (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+      }
       setIsScreenSharing(false);
     } else {
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-        if (videoRef.current) videoRef.current.srcObject = stream;
-        setIsScreenSharing(true);
-        stream.getVideoTracks()[0].onended = () => setIsScreenSharing(false);
-      } catch (err: any) { setPermissionError(err.message); }
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        if (videoRef.current) {
+          videoRef.current.srcObject = screenStream;
+          setIsScreenSharing(true);
+          screenStream.getVideoTracks()[0].onended = () => setIsScreenSharing(false);
+        }
+      } catch (err) {
+        console.error("Screen share failed:", err);
+      }
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSendMessage = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (!input.trim() || isTyping) return;
-    const userMessage: Message = { id: Date.now().toString(), role: 'user', content: input, timestamp: new Date() };
+
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: input,
+      timestamp: new Date(),
+      status: 'sending'
+    };
+
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setIsTyping(true);
 
-    let screenShot = null;
-    if (isScreenSharing && videoRef.current) {
-      const ctx = canvasRef.current.getContext('2d');
-      canvasRef.current.width = 1024; canvasRef.current.height = 768;
-      ctx?.drawImage(videoRef.current, 0, 0, 1024, 768);
-      screenShot = canvasRef.current.toDataURL('image/jpeg', 0.8);
-    }
-
     try {
-      const res = await generateResponse(userMessage.content, messages.slice(-5).map(m => ({
-        role: m.role === 'assistant' ? 'model' : m.role,
+      const history = messages.map(m => ({
+        role: m.role,
         parts: [{ text: m.content }]
-      })), searchRealDatabase, screenShot || undefined);
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: res.text || '', timestamp: new Date(), searchResults: res.results }]);
-    } catch (err: any) { 
-      setPermissionError(err.message); 
-    } finally { 
-      setIsTyping(false); 
+      }));
+
+      const { text, results } = await generateResponse(
+        userMessage.content,
+        history,
+        searchRealDatabase
+      );
+
+      const assistantMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: text || "I've explored the records and didn't find a precise match. Should we broaden our search parameters?",
+        timestamp: new Date(),
+        searchResults: results,
+        status: 'done'
+      };
+
+      setMessages(prev => prev.map(m => m.id === userMessage.id ? { ...m, status: 'done' } : m).concat(assistantMessage));
+    } catch (err) {
+      setMessages(prev => prev.map(m => m.id === userMessage.id ? { ...m, status: 'error' } : m));
+    } finally {
+      setIsTyping(false);
     }
   };
 
   return (
-    <div className="flex flex-col h-full bg-white relative">
-      <video ref={videoRef} autoPlay className="hidden" />
-      
-      {/* Premium Header */}
-      <div className="bg-[#002855] px-5 py-4 text-white flex justify-between items-center shadow-md shrink-0 z-10">
-        <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 rounded-full bg-white overflow-hidden border-2 border-white/20 flex-shrink-0">
-            <img 
-              src={BRAND_LOGO_URL} 
-              alt="Logo" 
-              className="w-full h-full object-contain scale-[1.5] translate-x-[-1px]" 
-            />
-          </div>
-          <div className="flex flex-col">
-            <span className="font-bold text-base tracking-tight leading-none mb-1">JewishData AI</span>
+    <div className="flex flex-col h-full bg-white border-stone-200">
+      <div className="p-4 border-b border-stone-200 flex items-center justify-between bg-stone-50">
+        <div className="flex items-center gap-3">
+          <img src={BRAND_LOGO_URL} alt="JewishData" className="h-8 w-auto" />
+          <div>
+            <h1 className="text-sm font-bold text-[#002855]">Research Partner</h1>
             <div className="flex items-center gap-1.5">
-              <span className={`w-2 h-2 rounded-full ${bridgeStatus === 'online' ? 'bg-emerald-400' : bridgeStatus === 'offline' ? 'bg-amber-400' : 'bg-stone-400 animate-pulse'}`}></span>
-              <span className="text-[9px] font-bold opacity-80 uppercase tracking-widest leading-none">
-                {bridgeStatus === 'online' ? 'System Online' : 'Local Archive Offline'}
+              <span className={`w-2 h-2 rounded-full ${isVoiceActive ? 'bg-red-500 animate-pulse' : 'bg-emerald-500'}`}></span>
+              <span className="text-[10px] text-stone-500 uppercase tracking-wider font-semibold">
+                {isVoiceActive ? 'Live Researching' : 'Ready'}
               </span>
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <button 
-            onClick={() => setShowLog(!showLog)} 
-            className="text-[10px] font-black uppercase tracking-wider bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-full transition-all border border-white/5"
-          >
-            Log ({researchLog.length})
-          </button>
-          {onClose && (
-            <button 
-              onClick={onClose} 
-              className="p-1 hover:bg-white/10 rounded-full transition-colors opacity-70 hover:opacity-100"
-              title="Minimize Assistant"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Research Log View */}
-      {showLog && (
-        <div className="absolute inset-x-0 top-[72px] bottom-0 bg-white z-50 flex flex-col animate-in slide-in-from-right duration-300">
-          <div className="p-4 border-b flex justify-between items-center bg-stone-50">
-            <h3 className="font-bold text-stone-800">Research Log</h3>
-            <button onClick={() => setShowLog(false)} className="text-stone-400 text-xl hover:text-stone-600 transition-colors">✕</button>
-          </div>
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
-            {researchLog.length === 0 ? (
-              <div className="text-center py-20 text-stone-400 italic text-sm px-10 leading-relaxed">
-                No records saved yet. Search for ancestors and click "+ Save to Log" to track your findings here.
-              </div>
-            ) : (
-              researchLog.map(r => (
-                <div key={r.id} className="p-3 border rounded-xl bg-white shadow-sm flex justify-between items-center hover:border-blue-200 transition-colors">
-                  <div>
-                    <div className="font-bold text-stone-900 text-sm">{r.surname}, {r.givenName}</div>
-                    <div className="text-[11px] text-stone-500">{r.location} • {r.year}</div>
-                  </div>
-                  <button onClick={() => setResearchLog(prev => prev.filter(x => x.id !== r.id))} className="text-red-400 text-[10px] font-bold uppercase tracking-wider hover:text-red-600 transition-colors px-2 py-1">Remove</button>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Dynamic Status / Alerts */}
-      {bridgeStatus === 'offline' && !permissionError && (
-        <div className="bg-amber-50 px-4 py-2 text-[10px] text-amber-800 border-b border-amber-100 flex justify-between items-center shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="font-black uppercase tracking-widest">Notice:</span>
-            <span>Local database bridge is disconnected. Using cloud index.</span>
-          </div>
-          <button onClick={() => checkBridge()} className="font-black underline uppercase tracking-tighter">Retry Sync</button>
-        </div>
-      )}
-
-      {permissionError && (
-        <div className="bg-red-50 p-3 text-[10px] text-red-700 flex justify-between items-center border-b border-red-100 shrink-0">
-          <span className="leading-tight font-medium">{permissionError}</span>
-          <button onClick={() => setPermissionError(null)} className="font-black text-lg ml-3">✕</button>
-        </div>
-      )}
-
-      {/* Controls */}
-      <div className="px-4 py-3 border-b bg-stone-50 flex gap-3 shrink-0">
-        <button 
-          onClick={isVoiceActive ? stopVoice : startVoice} 
-          className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-sm border ${isVoiceActive ? 'bg-red-500 text-white border-red-400 animate-pulse hover:bg-red-600' : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-100 hover:scale-[1.02]'}`}
-        >
-          <span className="text-sm">{isVoiceActive ? '⏹' : '🎙️'}</span>
-          {isVoiceActive ? 'Stop Assistant' : 'Voice Search'}
-        </button>
-        <button 
-          onClick={toggleScreenShare} 
-          className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-sm border ${isScreenSharing ? 'bg-blue-600 text-white border-blue-500' : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-100 hover:scale-[1.02]'}`}
-        >
-          <span className="text-sm">🖥️</span>
-          {isScreenSharing ? 'Sharing Active' : 'Sync Screen'}
+        <button onClick={onClose} className="text-stone-400 hover:text-stone-600 p-1">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M18 6L6 18M6 6l12 12"/>
+          </svg>
         </button>
       </div>
 
-      {/* Chat Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-8 bg-[#F8F9FA]">
-        {messages.map(m => (
-          <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[85%] p-4 rounded-2xl shadow-sm text-sm leading-relaxed ${m.role === 'user' ? 'bg-[#002855] text-white rounded-tr-none' : 'bg-white border border-stone-200/50 text-stone-800 rounded-tl-none shadow-[0_2px_10px_-4px_rgba(0,0,0,0.1)]'}`}>
-              <div className="whitespace-pre-wrap font-medium">{m.content}</div>
-              {m.searchResults?.map(r => (
-                <div key={r.id} className="mt-4 p-4 bg-stone-50 border border-stone-200 rounded-xl relative group shadow-inner hover:border-blue-300 transition-colors">
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <b className="text-[#002855] text-sm block font-bold">{r.surname}, {r.givenName}</b>
-                      <span className="text-[9px] text-stone-400 font-mono tracking-widest mt-0.5 block uppercase">UID: {r.id.slice(0, 8)}</span>
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#fcfaf7]">
+        {messages.map((msg) => (
+          <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[85%] rounded-2xl p-3 text-sm shadow-sm ${
+              msg.role === 'user' 
+                ? 'bg-[#002855] text-white rounded-tr-none' 
+                : 'bg-white border border-stone-200 text-stone-800 rounded-tl-none'
+            }`}>
+              <p className="leading-relaxed">{msg.content}</p>
+              
+              {msg.searchResults && msg.searchResults.length > 0 && (
+                <div className="mt-3 space-y-2 pt-3 border-t border-stone-100">
+                  <p className="text-[10px] font-bold text-[#002855] uppercase">Found Records:</p>
+                  {msg.searchResults.map((res) => (
+                    <div key={res.id} className="bg-stone-50 p-2 rounded border border-stone-200 text-[11px]">
+                      <div className="font-bold">{res.givenName} {res.surname}</div>
+                      <div className="text-stone-500">{res.location} ({res.year})</div>
+                      <div className="text-[#004e92] mt-1">{res.recordType}</div>
                     </div>
-                    <button 
-                      onClick={() => addToLog(r)}
-                      className="text-[10px] bg-white border border-stone-200 px-3 py-1.5 rounded-lg hover:bg-[#002855] hover:text-white font-bold shadow-sm transition-all"
-                    >
-                      {researchLog.find(x => x.id === r.id) ? 'Saved ✓' : '+ Add to Log'}
-                    </button>
-                  </div>
-                  <div className="mt-3 text-[12px] flex items-center gap-3 text-stone-600 font-semibold">
-                    <span className="bg-stone-200 px-2 py-0.5 rounded text-[10px]">{r.year}</span>
-                    <span className="w-1.5 h-1.5 bg-stone-300 rounded-full"></span>
-                    <span>{r.location}</span>
-                  </div>
-                  <div className="mt-3 pt-3 border-t border-stone-200/50 text-stone-500 italic text-[11px] leading-relaxed">
-                    "{r.details}"
-                  </div>
+                  ))}
                 </div>
-              ))}
-              <div className={`text-[9px] mt-3 opacity-50 uppercase tracking-[0.1em] font-bold ${m.role === 'user' ? 'text-right text-blue-100' : 'text-stone-400'}`}>
-                {m.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              )}
+              
+              <div className={`text-[10px] mt-1 opacity-50 ${msg.role === 'user' ? 'text-right' : 'text-left'}`}>
+                {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               </div>
             </div>
           </div>
         ))}
         {isTyping && (
-          <div className="flex items-center gap-3 px-2 text-stone-400">
-             <div className="flex space-x-1.5">
-               <div className="w-2 h-2 bg-stone-300 rounded-full animate-pulse"></div>
-               <div className="w-2 h-2 bg-stone-300 rounded-full animate-pulse [animation-delay:0.2s]"></div>
-               <div className="w-2 h-2 bg-stone-300 rounded-full animate-pulse [animation-delay:0.4s]"></div>
-             </div>
-             <span className="text-[10px] font-black uppercase tracking-[0.2em] animate-pulse">Consulting Archives...</span>
+          <div className="flex justify-start">
+            <div className="bg-white border border-stone-200 p-3 rounded-2xl rounded-tl-none shadow-sm">
+              <div className="flex gap-1">
+                <span className="w-1.5 h-1.5 bg-stone-300 rounded-full animate-bounce"></span>
+                <span className="w-1.5 h-1.5 bg-stone-300 rounded-full animate-bounce [animation-delay:0.2s]"></span>
+                <span className="w-1.5 h-1.5 bg-stone-300 rounded-full animate-bounce [animation-delay:0.4s]"></span>
+              </div>
+            </div>
           </div>
         )}
-        <div ref={scrollRef} />
+        {userTranscription && (
+           <div className="flex justify-end opacity-60">
+             <div className="bg-stone-100 text-stone-600 p-2 rounded-lg text-xs italic">
+               "{userTranscription}..."
+             </div>
+           </div>
+        )}
       </div>
 
-      {/* Modern sticky input */}
-      <div className="p-4 bg-white border-t border-stone-100 shadow-[0_-10px_20px_-15px_rgba(0,0,0,0.1)] shrink-0">
-        <form onSubmit={handleSubmit} className="flex gap-2 bg-stone-100 rounded-2xl p-1.5 border border-stone-200 focus-within:border-blue-400 focus-within:ring-4 focus-within:ring-blue-400/10 transition-all">
-          <input 
-            type="text" 
-            value={input} 
-            onChange={e => setInput(e.target.value)} 
-            placeholder={isVoiceActive ? "Speak to the assistant..." : "Search for Cohen, Levy, etc..."} 
-            className="flex-1 bg-transparent px-4 py-2.5 text-sm focus:outline-none placeholder:text-stone-400 placeholder:font-medium font-medium" 
-          />
-          <button 
-            type="submit" 
-            disabled={isTyping || !input.trim()} 
-            className="w-10 h-10 bg-[#002855] text-white rounded-xl flex items-center justify-center hover:bg-[#003a7c] disabled:bg-stone-300 disabled:opacity-100 shadow-md active:scale-95 transition-all flex-shrink-0"
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="translate-x-0.5"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
-          </button>
+      {isScreenSharing && (
+        <div className="px-4 pb-2">
+          <div className="relative rounded-lg overflow-hidden border-2 border-[#002855] bg-black aspect-video">
+            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-contain" />
+            <div className="absolute top-2 left-2 bg-red-600 text-white text-[10px] px-2 py-0.5 rounded font-bold uppercase animate-pulse">
+              Live Feed
+            </div>
+            <button 
+              onClick={toggleScreenShare}
+              className="absolute top-2 right-2 bg-black/50 text-white p-1 rounded hover:bg-black/70"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M18 6L6 18M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="p-4 border-t border-stone-200 bg-white">
+        <form onSubmit={handleSendMessage} className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={isVoiceActive ? "Listening..." : "Search family names..."}
+              disabled={isVoiceActive}
+              className="w-full pl-4 pr-10 py-2.5 bg-stone-100 border-none rounded-full text-sm focus:ring-2 focus:ring-[#002855] disabled:opacity-50"
+            />
+            {!isVoiceActive && (
+               <button 
+                type="submit" 
+                disabled={!input.trim()}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-[#002855] disabled:opacity-30 p-1"
+               >
+                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                   <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                 </svg>
+               </button>
+            )}
+          </div>
+          
+          <div className="flex items-center gap-2">
+             <button
+              type="button"
+              onClick={isVoiceActive ? stopVoice : startVoice}
+              disabled={isConnecting}
+              className={`p-2.5 rounded-full transition-all shadow-md ${
+                isVoiceActive 
+                  ? 'bg-red-500 text-white animate-pulse' 
+                  : 'bg-[#002855] text-white hover:bg-[#003d82]'
+              }`}
+            >
+              {isConnecting ? (
+                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              ) : (
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                  <line x1="12" y1="19" x2="12" y2="23"/>
+                  <line x1="8" y1="23" x2="16" y2="23"/>
+                </svg>
+              )}
+            </button>
+
+            {isVoiceActive && (
+              <button
+                type="button"
+                onClick={toggleScreenShare}
+                className={`p-2.5 rounded-full transition-all shadow-md ${
+                  isScreenSharing 
+                    ? 'bg-emerald-500 text-white' 
+                    : 'bg-stone-200 text-stone-600 hover:bg-stone-300'
+                }`}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                  <line x1="8" y1="21" x2="16" y2="21"/>
+                  <line x1="12" y1="17" x2="12" y2="21"/>
+                </svg>
+              </button>
+            )}
+          </div>
         </form>
+        {isVoiceActive && (
+          <div className="mt-2 flex items-center gap-2">
+             <div className="flex-1 h-1 bg-stone-100 rounded-full overflow-hidden">
+               <div 
+                 className="h-full bg-red-400 transition-all duration-75" 
+                 style={{ width: `${Math.min(100, micLevel * 800)}%` }}
+               />
+             </div>
+             <span className="text-[10px] font-bold text-stone-400 uppercase">Live Mic</span>
+          </div>
+        )}
       </div>
     </div>
   );
 };
 
+// Fix: Added the missing default export for the ChatInterface component.
 export default ChatInterface;
