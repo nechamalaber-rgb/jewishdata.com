@@ -33,6 +33,19 @@ const searchDatabaseDeclaration: FunctionDeclaration = {
   }
 };
 
+// Helper for retrying 500 errors
+const fetchWithRetry = async (fn: () => Promise<any>, retries = 2, delay = 1000): Promise<any> => {
+  try {
+    return await fn();
+  } catch (err: any) {
+    if (retries > 0 && (err.status === 500 || err.code === 500)) {
+      await new Promise(r => setTimeout(r, delay));
+      return fetchWithRetry(fn, retries - 1, delay * 2);
+    }
+    throw err;
+  }
+};
+
 export const generateResponse = async (
   prompt: string, 
   history: any[] = [],
@@ -40,16 +53,17 @@ export const generateResponse = async (
   base64Image?: string
 ) => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  const model = "gemini-3-pro-preview";
+  // Switched to Flash for speed and to avoid the current 500s on the Pro preview endpoint
+  const modelName = "gemini-3-flash-preview";
   
   const userParts: any[] = [{ text: prompt }];
   if (base64Image) {
     userParts.push({ inlineData: { data: base64Image.split(',')[1], mimeType: "image/jpeg" } });
   }
 
-  try {
+  return fetchWithRetry(async () => {
     const response = await ai.models.generateContent({
-      model: model,
+      model: modelName,
       contents: [...history, { role: "user", parts: userParts }],
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
@@ -63,7 +77,7 @@ export const generateResponse = async (
       const results = await toolHandler(call.args as any);
       
       const secondResponse = await ai.models.generateContent({
-        model: model,
+        model: modelName,
         contents: [
           ...history,
           { role: "user", parts: userParts },
@@ -82,8 +96,5 @@ export const generateResponse = async (
     }
 
     return { text: response.text, results: [] };
-  } catch (err: any) {
-    console.error("Gemini Pro Error:", err);
-    throw err;
-  }
+  });
 };
